@@ -1,0 +1,13 @@
+{
+  "name": "academic-planner-v2",
+  "version": "0.1.0",
+  "description": "Full degree path planning extension for the Academic Planner project, starting with UCSC CS",
+  "type": "module",
+  "scripts": {
+    "research:catalog": "node src/research/ucsc-cs-catalog.js"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.30.0",
+    "dotenv": "^16.4.5"
+  }
+}
