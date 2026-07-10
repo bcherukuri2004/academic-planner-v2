@@ -7,7 +7,7 @@
     "research:catalog": "node src/research/ucsc-cs-catalog.js"
   },
   "dependencies": {
-    "@anthropic-ai/sdk": "^0.30.0",
+    "@anthropic-ai/sdk": "^0.111.0",
     "dotenv": "^16.4.5"
   }
 }
