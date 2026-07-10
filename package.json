@@ -4,7 +4,8 @@
   "description": "Full degree path planning extension for the Academic Planner project, starting with UCSC CS",
   "type": "module",
   "scripts": {
-    "research:catalog": "node src/research/ucsc-cs-catalog.js"
+    "research:catalog": "node src/research/ucsc-cs-catalog.js",
+    "research:offerings": "node src/research/ucsc-course-offerings.js"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.111.0",
