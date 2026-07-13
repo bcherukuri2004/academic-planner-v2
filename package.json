@@ -10,5 +10,8 @@
   "dependencies": {
     "@anthropic-ai/sdk": "^0.111.0",
     "dotenv": "^16.4.5"
+  },
+  "devDependencies": {
+    "pdfkit": "^0.19.1"
   }
 }
