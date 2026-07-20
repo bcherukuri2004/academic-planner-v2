@@ -2,11 +2,7 @@
 // (PDF, typically saved via the browser's print to PDF, since UCSC does not
 // offer a direct PDF download) into structured completed course data.
 //
-// Import pdf-parse's internal lib module directly rather than the package
-// root. The package root's index.js has a debug-mode block that runs a test
-// file read whenever module.parent is falsy, which is always true under
-// dynamic ESM import and crashes with ENOENT unrelated to the input file.
-import pdfParse from "pdf-parse/lib/pdf-parse.js";
+import { extractPdfText } from "./pdf-text.js";
 
 // UCSC term codes are not arbitrary: "2" + last two digits of the year +
 // a quarter digit (Winter=0, Spring=2, Summer=4, Fall=8). Decoding from this
@@ -254,34 +250,47 @@ function parseCourseTable(sectionText, flags) {
 // doesn't resolve to a normal SUBJECT NUMBER course code.
 function parseTransferCredit(sectionText, flags) {
   const blob = sectionText.replace(/\s+/g, " ").trim();
-  const institutionAnchor = /[A-Z][A-Z .&']*(?:COLLEGE|UNIVERSITY)(?=\d{4})/g;
-  const anchors = [...blob.matchAll(institutionAnchor)];
+  // Anchor on "year + quarter" (e.g. "2023 SUMR"), not the institution name.
+  // An institution-name anchor is ambiguous: it's just uppercase letters and
+  // spaces, indistinguishable from the previous row's trailing grade letter
+  // ("B OHLONE COLLEGE" would otherwise be read as one institution name).
+  const yearQuarterAnchor = /(\d{4})\s+(SUMR|FALL|WIN|SPR)/g;
+  const anchors = [...blob.matchAll(yearQuarterAnchor)];
   const rows = [];
+  let cursor = 0;
 
   for (let i = 0; i < anchors.length; i++) {
     const anchor = anchors[i];
-    const nextStart = i + 1 < anchors.length ? anchors[i + 1].index : blob.length;
-    const rowText = blob.slice(anchor.index, nextStart);
-    const institution = anchor[0].trim();
-    const rowBody = rowText.slice(anchor[0].length);
+    const precedingText = blob.slice(cursor, anchor.index);
+    const institutionMatch = /([A-Z][A-Z .&']*(?:COLLEGE|UNIVERSITY))\s*$/.exec(precedingText);
+    const institution = institutionMatch ? institutionMatch[1].trim() : null;
 
+    if (!institution) {
+      flags.push({
+        area: "transfer_credit",
+        issue: `Could not find an institution name before "${anchor[0]}" in: "${precedingText}"`,
+        confidence: "low",
+      });
+    }
+
+    const rowBody = blob.slice(anchor.index + anchor[0].length);
     const frontMatch =
-      /^\d{4}\s*(?:SUMR|FALL|WIN|SPR)([A-Z]{2,6})\s*([A-Z]?[0-9]+[A-Z]{0,3})(\d{1,2}\.\d{2})([A-Z][+-]?)Posted/.exec(
-        rowBody,
-      );
+      /^\s*([A-Z]{2,6})\s*([A-Z]?[0-9]+[A-Z]{0,3})\s*(\d{1,2}\.\d{2})\s*([A-Z][+-]?)\s*Posted\s*/.exec(rowBody);
     if (!frontMatch) {
-      flags.push({ area: "transfer_credit", issue: `Could not parse external course details for ${institution}: "${rowBody}"`, confidence: "low" });
+      flags.push({ area: "transfer_credit", issue: `Could not parse external course details for ${institution ?? "unknown institution"}: "${rowBody.slice(0, 100)}"`, confidence: "low" });
+      cursor = anchor.index + anchor[0].length;
       continue;
     }
     const [, , externalNumber, unitsTaken, gradeIn] = frontMatch;
 
-    const equivalentText = rowBody.slice(frontMatch.index + frontMatch[0].length).replace(/^TRCR\s*/, "").trim();
-    const equivMatch = /^([A-Z]{2,6})\s*([A-Z]?[0-9]+[A-Z]{0,3})?\s*(\d{1,2}\.\d{3})?\s*([A-Z][+-]?)$/.exec(
-      equivalentText,
+    const afterFront = rowBody.slice(frontMatch[0].length).replace(/^TRCR\s*/, "");
+    const equivMatch = /^([A-Z]{2,6})\s*([A-Z]?[0-9]+[A-Z]{0,3})?\s*(\d{1,2}\.\d{3})?\s*([A-Z][+-]?)/.exec(
+      afterFront,
     );
 
     if (!equivMatch) {
-      flags.push({ area: "transfer_credit", issue: `Could not parse the UCSC-equivalent side for ${institution} ${externalNumber}: "${equivalentText}"`, confidence: "low" });
+      flags.push({ area: "transfer_credit", issue: `Could not parse the UCSC-equivalent side for ${institution ?? "unknown institution"} ${externalNumber}: "${afterFront.slice(0, 100)}"`, confidence: "low" });
+      cursor = anchor.index + anchor[0].length + frontMatch[0].length;
       continue;
     }
     const [, equivSubject, equivNumber, unitsAccepted, equivGrade] = equivMatch;
@@ -289,7 +298,7 @@ function parseTransferCredit(sectionText, flags) {
     if (!equivNumber || !unitsAccepted) {
       flags.push({
         area: "transfer_credit",
-        issue: `${institution} ${externalNumber} maps to "${equivalentText}", which doesn't look like a standard course + unit mapping (likely a GE bucket credit, not a specific course)`,
+        issue: `${institution ?? "unknown institution"} ${externalNumber} maps to "${equivMatch[0]}", which doesn't look like a standard course + unit mapping (likely a GE bucket credit, not a specific course)`,
         confidence: "low",
       });
     }
@@ -309,6 +318,11 @@ function parseTransferCredit(sectionText, flags) {
       external_institution: institution,
       external_grade: gradeIn,
     });
+
+    // Advance cursor to right after this row's matched equivalent text, so
+    // the next iteration's institution search starts from there.
+    const consumedBeforeEquiv = rowBody.indexOf(afterFront) + equivMatch[0].length;
+    cursor = anchor.index + anchor[0].length + consumedBeforeEquiv;
   }
 
   return rows;
@@ -316,7 +330,7 @@ function parseTransferCredit(sectionText, flags) {
 
 function parseTestCredit(sectionText, flags) {
   const blob = sectionText.replace(/\s+/g, " ").trim();
-  const rowRegex = /(AP|IB|SAT|A-LEVEL)([A-Za-z ]+?)(\d{4}-\d{2}-\d{2})(\d+)Posted([A-Z]{2,6})\s*([0-9]+[A-Z]{0,2}?)(\d{1,2}\.\d{3})([A-Z][+-]?|P)/g;
+  const rowRegex = /(AP|IB|SAT|A-LEVEL)\s*([A-Za-z ]+?)\s*(\d{4}-\d{2}-\d{2})\s*(\d+)\s*Posted\s*([A-Z]{2,6})\s*([0-9]+[A-Z]{0,2}?)\s*(\d{1,2}\.\d{3})\s*([A-Z][+-]?|P)/g;
   const rows = [];
   let match;
   while ((match = rowRegex.exec(blob)) !== null) {
@@ -342,7 +356,7 @@ function parseTestCredit(sectionText, flags) {
 }
 
 export async function parseDegreeAudit(pdfBuffer) {
-  const { text: rawText } = await pdfParse(pdfBuffer);
+  const rawText = await extractPdfText(pdfBuffer);
   const text = stripPrintArtifacts(rawText);
   const flags = [];
 
@@ -356,9 +370,23 @@ export async function parseDegreeAudit(pdfBuffer) {
 
   const transferSectionText = sliceSection(text, "Transfer Credit", ["Test Credit", "Go to top"]) ?? "";
   const transferCourses = parseTransferCredit(transferSectionText, flags);
+  if (transferCourses.length === 0 && /[A-Z]{2,}/.test(transferSectionText)) {
+    flags.push({
+      area: "transfer_credit",
+      issue: `Transfer Credit section has content but zero rows were extracted: "${transferSectionText.slice(0, 300)}"`,
+      confidence: "low",
+    });
+  }
 
   const testSectionText = sliceSection(text, "Test Credit", ["Go to top"]) ?? "";
   const testCourses = parseTestCredit(testSectionText, flags);
+  if (testCourses.length === 0 && /[A-Z]{2,}/.test(testSectionText)) {
+    flags.push({
+      area: "test_credit",
+      issue: `Test Credit section has content but zero rows were extracted: "${testSectionText.slice(0, 300)}"`,
+      confidence: "low",
+    });
+  }
 
   return {
     ...objectives,
